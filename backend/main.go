@@ -427,7 +427,11 @@ func uploadFileToPeer(filePath, targetIP, transferID, filename string) {
 	form.WriteField("transferId", transferID)
 	form.Close()
 
-	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:%s/api/upload", targetIP, serverPort), body)
+	req, err := http.NewRequest(
+		"POST",
+		fmt.Sprintf("http://%s:%s/api/upload", targetIP, serverPort),
+		body,
+	)
 	if err != nil {
 		log.Println("Failed to create upload request:", err)
 		return
@@ -597,7 +601,6 @@ func rejectTransfer(w http.ResponseWriter, r *http.Request) {
 // Receiver handler
 func receiveIncomingFile(w http.ResponseWriter, r *http.Request) {
 	transferID := r.FormValue("transferId")
-
 	file, header, err := r.FormFile("file")
 	if err != nil {
 		http.Error(w, "Failed to read file", http.StatusBadRequest)
@@ -607,8 +610,8 @@ func receiveIncomingFile(w http.ResponseWriter, r *http.Request) {
 
 	tempDir := filepath.Join(os.TempDir(), "file-share")
 	os.MkdirAll(tempDir, 0o755)
-
 	tempPath := filepath.Join(tempDir, transferID+"_"+header.Filename)
+
 	out, err := os.Create(tempPath)
 	if err != nil {
 		http.Error(w, "Failed to save file", http.StatusInternalServerError)
@@ -617,6 +620,13 @@ func receiveIncomingFile(w http.ResponseWriter, r *http.Request) {
 	defer out.Close()
 
 	io.Copy(out, file)
+
+	// Update transfer status to "completed"
+	if transfer, exists := transfers[transferID]; exists {
+		transfer.Status = "completed"
+		broadcastMessage("transfer_completed", transfer)
+	}
+
 	w.WriteHeader(http.StatusOK)
 }
 

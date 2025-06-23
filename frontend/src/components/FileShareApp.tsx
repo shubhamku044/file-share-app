@@ -410,9 +410,28 @@ const FileShareApp: React.FC = () => {
             </div>
           </div>
         )}
+        {transfers.filter(t => t.status === 'completed' && t.to === deviceName).map((transfer) => (
+          <div key={transfer.id} className="border rounded-lg p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="font-medium text-gray-800">{transfer.filename}</div>
+                <div className="text-sm text-gray-500">
+                  From: {transfer.from} • Size: {(transfer.size / 1024 / 1024).toFixed(2)} MB
+                </div>
+              </div>
+              <button
+                onClick={() => handleDownloadFile(transfer.id)}
+                className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors flex items-center space-x-1"
+              >
+                <Download className="w-4 h-4" />
+                <span>Download</span>
+              </button>
+            </div>
+          </div>
+        ))}
 
         {/* Accepted transfers ready for download */}
-        {transfers.filter(t => t.status === 'accepted' && t.to === deviceName).length > 0 && (
+        {transfers.filter(t => t.status === 'accepted').length > 0 && (
           <div className="bg-white rounded-2xl shadow-xl p-6 mt-6">
             <h3 className="text-lg font-semibold text-gray-800 mb-4">Ready to Download</h3>
             <div className="space-y-4">
