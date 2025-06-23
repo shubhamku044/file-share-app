@@ -415,7 +415,6 @@ func uploadFileToPeer(filePath, targetIP, transferID, filename string) {
 	defer file.Close()
 
 	body := &bytes.Buffer{}
-	writer := io.MultiWriter(body)
 	form := multipart.NewWriter(body)
 
 	part, err := form.CreateFormFile("file", filename)
@@ -634,7 +633,7 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	transferID := vars["transferId"]
 
-	transfer, exists := transfers[transferID]
+	_, exists := transfers[transferID]
 	if !exists {
 		http.Error(w, "Transfer not found", http.StatusNotFound)
 		return

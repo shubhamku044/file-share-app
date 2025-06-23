@@ -410,7 +410,7 @@ const FileShareApp: React.FC = () => {
             </div>
           </div>
         )}
-        {transfers.filter(t => t.status === 'completed' && t.to === deviceName).map((transfer) => (
+        {transfers.filter(t => t.status === 'completed').map((transfer) => (
           <div key={transfer.id} className="border rounded-lg p-4">
             <div className="flex items-center justify-between">
               <div>
