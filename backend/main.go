@@ -92,6 +92,7 @@ func main() {
 	r.HandleFunc("/api/peers", getPeers).Methods("GET")
 	r.HandleFunc("/api/send", sendFile).Methods("POST")
 	r.HandleFunc("/api/receive/{transferId}", receiveFile).Methods("GET")
+	r.HandleFunc("/api/receive/{transferId}", receiveFileUpload).Methods("POST") // ← Add this
 	r.HandleFunc("/api/accept/{transferId}", acceptTransfer).Methods("POST")
 	r.HandleFunc("/api/reject/{transferId}", rejectTransfer).Methods("POST")
 	r.HandleFunc("/api/notify-transfer", notifyTransfer).Methods("POST")
@@ -480,6 +481,49 @@ func receiveFile(w http.ResponseWriter, r *http.Request) {
 	os.Remove(tempPath)
 	transfer.Status = "completed"
 	broadcastMessage("transfer_completed", transfer)
+}
+
+// Handles actual file upload from sender → receiver
+func receiveFileUpload(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	transferID := vars["transferId"]
+
+	transfer, exists := transfers[transferID]
+	if !exists {
+		http.Error(w, "Transfer not found", http.StatusNotFound)
+		return
+	}
+
+	err := r.ParseMultipartForm(32 << 20)
+	if err != nil {
+		http.Error(w, "Failed to parse form", http.StatusBadRequest)
+		return
+	}
+
+	file, handler, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "File not found in form", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	tempDir := filepath.Join(os.TempDir(), "file-share")
+	os.MkdirAll(tempDir, 0o755)
+	tempPath := filepath.Join(tempDir, transferID+"_"+handler.Filename)
+
+	out, err := os.Create(tempPath)
+	if err != nil {
+		http.Error(w, "Failed to create file", http.StatusInternalServerError)
+		return
+	}
+	defer out.Close()
+
+	io.Copy(out, file)
+
+	transfer.Status = "accepted" // or maybe "ready"
+	broadcastMessage("transfer_accepted", transfer)
+
+	json.NewEncoder(w).Encode(map[string]string{"status": "received"})
 }
 
 func acceptTransfer(w http.ResponseWriter, r *http.Request) {
