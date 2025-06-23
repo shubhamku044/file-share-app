@@ -80,6 +80,7 @@ const FileShareApp: React.FC = () => {
     wsRef.current = ws;
   };
 
+
   const handleWebSocketMessage = (message: WebSocketMessage) => {
     switch (message.type) {
       case 'peer_discovered':

@@ -97,6 +97,7 @@ func main() {
 	r.HandleFunc("/api/notify-transfer", notifyTransfer).Methods("POST")
 	r.HandleFunc("/api/device-name", getDeviceName).Methods("GET")
 	r.HandleFunc("/api/upload", receiveIncomingFile).Methods("POST")
+	r.HandleFunc("/api/upload/{transferId}", uploadFile).Methods("POST")
 
 	// Discovery endpoint
 	r.HandleFunc("/discover", handleDiscovery).Methods("GET")
@@ -492,6 +493,35 @@ func acceptTransfer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	transfer.Status = "accepted"
+
+	go func() {
+		filePath := filepath.Join(os.TempDir(), "file-share", transfer.ID+"_"+transfer.Filename)
+		file, err := os.Open(filePath)
+		if err != nil {
+			log.Println("Error opening file to send:", err)
+			return
+		}
+		defer file.Close()
+
+		body := &bytes.Buffer{}
+		writer := multipart.NewWriter(body)
+		part, err := writer.CreateFormFile("file", transfer.Filename)
+		if err != nil {
+			log.Println("Error creating form file:", err)
+			return
+		}
+		io.Copy(part, file)
+		writer.Close()
+
+		uploadURL := fmt.Sprintf("http://%s:%s/api/upload/%s", transfer.To, serverPort, transfer.ID)
+		resp, err := http.Post(uploadURL, writer.FormDataContentType(), body)
+		if err != nil {
+			log.Println("Error uploading file to receiver:", err)
+			return
+		}
+		defer resp.Body.Close()
+		log.Println("Uploaded file to", transfer.To)
+	}()
 	broadcastMessage("transfer_accepted", transfer)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -544,4 +574,45 @@ func receiveIncomingFile(w http.ResponseWriter, r *http.Request) {
 
 	io.Copy(out, file)
 	w.WriteHeader(http.StatusOK)
+}
+
+func uploadFile(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	transferID := vars["transferId"]
+
+	transfer, exists := transfers[transferID]
+	if !exists {
+		http.Error(w, "Transfer not found", http.StatusNotFound)
+		return
+	}
+
+	err := r.ParseMultipartForm(32 << 20)
+	if err != nil {
+		http.Error(w, "Failed to parse form", http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "Failed to read file", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	tempDir := filepath.Join(os.TempDir(), "file-share")
+	os.MkdirAll(tempDir, 0o755)
+
+	filePath := filepath.Join(tempDir, transferID+"_"+header.Filename)
+	out, err := os.Create(filePath)
+	if err != nil {
+		http.Error(w, "Failed to create file", http.StatusInternalServerError)
+		return
+	}
+	defer out.Close()
+
+	io.Copy(out, file)
+
+	// Confirm save
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "uploaded"})
 }
