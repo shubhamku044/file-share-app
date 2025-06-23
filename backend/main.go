@@ -407,6 +407,7 @@ func notifyPeerOfTransfer(targetIP string, transfer *FileTransfer) {
 }
 
 func uploadFileToPeer(filePath, targetIP, transferID, filename string) {
+	log.Printf("UploadFileToPeer: Starting upload to %s for transfer %s", targetIP, transferID)
 	file, err := os.Open(filePath)
 	if err != nil {
 		log.Println("Failed to open file for upload:", err)
@@ -538,8 +539,10 @@ func acceptTransfer(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Transfer not found", http.StatusNotFound)
 		return
 	}
-
+	log.Printf("AcceptTransfer: Transfer found - ID: %s, Status: %s", transferID, transfer.Status)
 	transfer.Status = "accepted"
+
+	log.Printf("AcceptTransfer: Updated status to 'accepted' for ID: %s", transferID)
 
 	go func() {
 		filePath := filepath.Join(os.TempDir(), "file-share", transfer.ID+"_"+transfer.Filename)
@@ -571,6 +574,8 @@ func acceptTransfer(w http.ResponseWriter, r *http.Request) {
 	}()
 	broadcastMessage("transfer_accepted", transfer)
 
+	log.Printf("AcceptTransfer: Broadcasted transfer_accepted for ID: %s", transferID)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(transfer)
 }
@@ -600,6 +605,7 @@ func rejectTransfer(w http.ResponseWriter, r *http.Request) {
 // Receiver handler
 func receiveIncomingFile(w http.ResponseWriter, r *http.Request) {
 	transferID := r.FormValue("transferId")
+	log.Printf("ReceiveIncomingFile: Received file for transfer %s", transferID)
 	file, header, err := r.FormFile("file")
 	if err != nil {
 		http.Error(w, "Failed to read file", http.StatusBadRequest)
@@ -608,6 +614,8 @@ func receiveIncomingFile(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	tempDir := filepath.Join(os.TempDir(), "file-share")
+	log.Printf("ReceiveIncomingFile: Saving file to %s", tempDir)
+
 	os.MkdirAll(tempDir, 0o755)
 	tempPath := filepath.Join(tempDir, transferID+"_"+header.Filename)
 
@@ -619,6 +627,8 @@ func receiveIncomingFile(w http.ResponseWriter, r *http.Request) {
 	defer out.Close()
 
 	io.Copy(out, file)
+
+	log.Printf("ReceiveIncomingFile: File saved successfully")
 
 	// Update transfer status to "completed"
 	if transfer, exists := transfers[transferID]; exists {
