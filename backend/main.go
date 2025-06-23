@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"os"
@@ -95,6 +96,7 @@ func main() {
 	r.HandleFunc("/api/reject/{transferId}", rejectTransfer).Methods("POST")
 	r.HandleFunc("/api/notify-transfer", notifyTransfer).Methods("POST")
 	r.HandleFunc("/api/device-name", getDeviceName).Methods("GET")
+	r.HandleFunc("/api/upload", receiveIncomingFile).Methods("POST")
 
 	// Discovery endpoint
 	r.HandleFunc("/discover", handleDiscovery).Methods("GET")
@@ -366,6 +368,8 @@ func sendFile(w http.ResponseWriter, r *http.Request) {
 	// Notify target peer
 	go notifyPeerOfTransfer(targetIP, transfer)
 
+	go uploadFileToPeer(tempPath, targetIP, transferID, header.Filename)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(transfer)
 }
@@ -398,6 +402,47 @@ func notifyPeerOfTransfer(targetIP string, transfer *FileTransfer) {
 		return
 	}
 	defer resp.Body.Close()
+}
+
+func uploadFileToPeer(filePath, targetIP, transferID, filename string) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		log.Println("Failed to open file for upload:", err)
+		return
+	}
+	defer file.Close()
+
+	body := &bytes.Buffer{}
+	writer := io.MultiWriter(body)
+	form := multipart.NewWriter(body)
+
+	part, err := form.CreateFormFile("file", filename)
+	if err != nil {
+		log.Println("Failed to create form file:", err)
+		return
+	}
+	io.Copy(part, file)
+	form.WriteField("transferId", transferID)
+	form.Close()
+
+	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:%s/api/upload", targetIP, serverPort), body)
+	if err != nil {
+		log.Println("Failed to create upload request:", err)
+		return
+	}
+	req.Header.Set("Content-Type", form.FormDataContentType())
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Println("Failed to upload file to peer:", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Println("Peer upload failed with status:", resp.Status)
+	}
 }
 
 func receiveFile(w http.ResponseWriter, r *http.Request) {
@@ -473,4 +518,30 @@ func rejectTransfer(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(transfer)
+}
+
+// Receiver handler
+func receiveIncomingFile(w http.ResponseWriter, r *http.Request) {
+	transferID := r.FormValue("transferId")
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "Failed to read file", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	tempDir := filepath.Join(os.TempDir(), "file-share")
+	os.MkdirAll(tempDir, 0o755)
+
+	tempPath := filepath.Join(tempDir, transferID+"_"+header.Filename)
+	out, err := os.Create(tempPath)
+	if err != nil {
+		http.Error(w, "Failed to save file", http.StatusInternalServerError)
+		return
+	}
+	defer out.Close()
+
+	io.Copy(out, file)
+	w.WriteHeader(http.StatusOK)
 }

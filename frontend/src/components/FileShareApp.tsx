@@ -95,9 +95,16 @@ const FileShareApp: React.FC = () => {
         setPeers(prev => prev.filter(p => p.ip !== message.data.ip));
         break;
       case 'transfer_request':
-        setTransfers(prev => [...prev, message.data]);
+        setTransfers(prev => {
+          const exists = prev.find(t => t.id === message.data.id);
+          return exists ? prev : [...prev, message.data];
+        });
         break;
       case 'transfer_accepted':
+        setTransfers(prev =>
+          prev.map(t => t.id === message.data.id ? { ...t, status: 'accepted' } : t)
+        );
+        break;
       case 'transfer_rejected':
       case 'transfer_completed':
         setTransfers(prev =>
@@ -202,7 +209,7 @@ const FileShareApp: React.FC = () => {
     }
   };
 
-  const incomingTransfers = transfers.filter(t => t.to !== deviceName && t.status === 'pending');
+  const incomingTransfers = transfers.filter(t => t.to === deviceName && t.status === 'pending');
   const outgoingTransfers = transfers.filter(t => t.from === deviceName);
 
   return (
@@ -298,6 +305,33 @@ const FileShareApp: React.FC = () => {
                       <div className="text-sm text-gray-500 truncate">{peer.ip}</div>
                     </div>
                     <div className="w-2 h-2 bg-green-500 rounded-full ml-2"></div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {transfers.filter(t => t.status === 'accepted' && t.to === deviceName).length > 0 && (
+          <div className="bg-white rounded-2xl shadow-xl p-6 mt-6">
+            <h3 className="text-lg font-semibold text-gray-800 mb-4">Ready to Download</h3>
+            <div className="space-y-4">
+              {transfers.filter(t => t.status === 'accepted' && t.to === deviceName).map((transfer) => (
+                <div key={transfer.id} className="border rounded-lg p-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="font-medium text-gray-800">{transfer.filename}</div>
+                      <div className="text-sm text-gray-500">
+                        From: {transfer.from} • Size: {(transfer.size / 1024 / 1024).toFixed(2)} MB
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => handleDownloadFile(transfer.id)}
+                      className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors flex items-center space-x-1"
+                    >
+                      <Download className="w-4 h-4" />
+                      <span>Download</span>
+                    </button>
                   </div>
                 </div>
               ))}
