@@ -91,14 +91,12 @@ func main() {
 	// API endpoints
 	r.HandleFunc("/api/peers", getPeers).Methods("GET")
 	r.HandleFunc("/api/send", sendFile).Methods("POST")
-	r.HandleFunc("/api/receive/{transferId}", receiveFile).Methods("GET")
-	r.HandleFunc("/api/receive/{transferId}", receiveFileUpload).Methods("POST") // ← Add this
+	r.HandleFunc("/api/download/{transferId}", downloadFile).Methods("GET")
 	r.HandleFunc("/api/accept/{transferId}", acceptTransfer).Methods("POST")
 	r.HandleFunc("/api/reject/{transferId}", rejectTransfer).Methods("POST")
 	r.HandleFunc("/api/notify-transfer", notifyTransfer).Methods("POST")
 	r.HandleFunc("/api/device-name", getDeviceName).Methods("GET")
-	r.HandleFunc("/api/upload", receiveIncomingFile).Methods("POST")
-	r.HandleFunc("/api/upload/{transferId}", uploadFile).Methods("POST")
+	r.HandleFunc("/api/upload/{transferId}", receiveFileFromSender).Methods("POST")
 
 	// Discovery endpoint
 	r.HandleFunc("/discover", handleDiscovery).Methods("GET")
@@ -353,7 +351,7 @@ func sendFile(w http.ResponseWriter, r *http.Request) {
 
 	transfers[transferID] = transfer
 
-	// Save file temporarily
+	// Save file temporarily on sender side
 	tempDir := filepath.Join(os.TempDir(), "file-share")
 	os.MkdirAll(tempDir, 0o755)
 
@@ -367,10 +365,8 @@ func sendFile(w http.ResponseWriter, r *http.Request) {
 
 	io.Copy(tempFile, file)
 
-	// Notify target peer
+	// Notify target peer about the transfer
 	go notifyPeerOfTransfer(targetIP, transfer)
-
-	go uploadFileToPeer(tempPath, targetIP, transferID, header.Filename)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(transfer)
@@ -406,95 +402,117 @@ func notifyPeerOfTransfer(targetIP string, transfer *FileTransfer) {
 	defer resp.Body.Close()
 }
 
-func uploadFileToPeer(filePath, targetIP, transferID, filename string) {
-	log.Printf("UploadFileToPeer: Starting upload to %s for transfer %s", targetIP, transferID)
-	file, err := os.Open(filePath)
-	if err != nil {
-		log.Println("Failed to open file for upload:", err)
+func acceptTransfer(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	transferID := vars["transferId"]
+
+	transfer, exists := transfers[transferID]
+	if !exists {
+		http.Error(w, "Transfer not found", http.StatusNotFound)
 		return
 	}
-	defer file.Close()
 
-	body := &bytes.Buffer{}
-	form := multipart.NewWriter(body)
+	log.Printf("AcceptTransfer: Transfer found - ID: %s, Status: %s", transferID, transfer.Status)
+	transfer.Status = "accepted"
 
-	part, err := form.CreateFormFile("file", filename)
-	if err != nil {
-		log.Println("Failed to create form file:", err)
+	// Notify sender to upload the file
+	go requestFileFromSender(transfer)
+
+	broadcastMessage("transfer_accepted", transfer)
+	log.Printf("AcceptTransfer: Broadcasted transfer_accepted for ID: %s", transferID)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(transfer)
+}
+
+func requestFileFromSender(transfer *FileTransfer) {
+	// Find sender's IP from the transfer.From field
+	// We need to extract IP from device name or use a mapping
+	// For now, let's assume transfer.From contains the IP or we find it in peers
+	var senderIP string
+	for ip, peer := range peers {
+		if peer.Name == transfer.From {
+			senderIP = ip
+			break
+		}
+	}
+
+	if senderIP == "" {
+		log.Printf("Could not find sender IP for transfer %s", transfer.ID)
 		return
 	}
-	io.Copy(part, file)
-	form.WriteField("transferId", transferID)
-	form.Close()
 
-	req, err := http.NewRequest(
-		"POST",
-		fmt.Sprintf("http://%s:%s/api/upload", targetIP, serverPort),
-		body,
-	)
+	// Request the file from sender
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://%s:%s/api/upload/%s", senderIP, serverPort, transfer.ID))
 	if err != nil {
-		log.Println("Failed to create upload request:", err)
-		return
-	}
-	req.Header.Set("Content-Type", form.FormDataContentType())
-
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Println("Failed to upload file to peer:", err)
+		log.Printf("Error requesting file from sender: %v", err)
 		return
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		log.Println("Peer upload failed with status:", resp.Status)
-	}
+	log.Printf("Requested file from sender %s for transfer %s", senderIP, transfer.ID)
 }
 
-func receiveFile(w http.ResponseWriter, r *http.Request) {
+func receiveFileFromSender(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	transferID := vars["transferId"]
 
 	transfer, exists := transfers[transferID]
 	if !exists {
-		http.Error(w, "Transfer not found", http.StatusNotFound)
+		// This might be a cross-device transfer, try to get file from sender
+		log.Printf("Transfer %s not found locally, attempting to fetch from sender", transferID)
+
+		// Parse the form to get file
+		err := r.ParseMultipartForm(32 << 20)
+		if err != nil {
+			http.Error(w, "Failed to parse form", http.StatusBadRequest)
+			return
+		}
+
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			http.Error(w, "File not found in form", http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+
+		// Save the file
+		tempDir := filepath.Join(os.TempDir(), "file-share")
+		os.MkdirAll(tempDir, 0o755)
+		tempPath := filepath.Join(tempDir, transferID+"_"+header.Filename)
+
+		out, err := os.Create(tempPath)
+		if err != nil {
+			http.Error(w, "Failed to create file", http.StatusInternalServerError)
+			return
+		}
+		defer out.Close()
+
+		io.Copy(out, file)
+
+		// Create transfer record if it doesn't exist
+		transfer = &FileTransfer{
+			ID:       transferID,
+			Filename: header.Filename,
+			Size:     header.Size,
+			From:     r.FormValue("from"),
+			To:       deviceName,
+			Status:   "completed",
+		}
+		transfers[transferID] = transfer
+
+		broadcastMessage("transfer_completed", transfer)
+		log.Printf("File received and saved for transfer %s", transferID)
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "received"})
 		return
 	}
 
+	// If transfer exists, this is the sender uploading the file
 	if transfer.Status != "accepted" {
 		http.Error(w, "Transfer not accepted", http.StatusBadRequest)
-		return
-	}
-
-	tempDir := filepath.Join(os.TempDir(), "file-share")
-	tempPath := filepath.Join(tempDir, transferID+"_"+transfer.Filename)
-
-	file, err := os.Open(tempPath)
-	if err != nil {
-		http.Error(w, "File not found", http.StatusNotFound)
-		return
-	}
-	defer file.Close()
-
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", transfer.Filename))
-	w.Header().Set("Content-Type", "application/octet-stream")
-
-	io.Copy(w, file)
-
-	// Clean up
-	os.Remove(tempPath)
-	transfer.Status = "completed"
-	broadcastMessage("transfer_completed", transfer)
-}
-
-// Handles actual file upload from sender → receiver
-func receiveFileUpload(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	transferID := vars["transferId"]
-
-	transfer, exists := transfers[transferID]
-	if !exists {
-		http.Error(w, "Transfer not found", http.StatusNotFound)
 		return
 	}
 
@@ -504,16 +522,60 @@ func receiveFileUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	file, handler, err := r.FormFile("file")
+	file, header, err := r.FormFile("file")
 	if err != nil {
-		http.Error(w, "File not found in form", http.StatusBadRequest)
+		// This endpoint was called by receiver to get file from sender
+		log.Printf("Sender serving file for transfer %s", transferID)
+
+		tempDir := filepath.Join(os.TempDir(), "file-share")
+		tempPath := filepath.Join(tempDir, transferID+"_"+transfer.Filename)
+
+		fileData, err := os.Open(tempPath)
+		if err != nil {
+			http.Error(w, "File not found", http.StatusNotFound)
+			return
+		}
+		defer fileData.Close()
+
+		// Upload file to receiver
+		body := &bytes.Buffer{}
+		writer := multipart.NewWriter(body)
+		part, err := writer.CreateFormFile("file", transfer.Filename)
+		if err != nil {
+			log.Println("Error creating form file:", err)
+			return
+		}
+		io.Copy(part, fileData)
+		writer.WriteField("from", transfer.From)
+		writer.Close()
+
+		// Send to receiver
+		receiverIP := transfer.To
+		uploadURL := fmt.Sprintf("http://%s:%s/api/upload/%s", receiverIP, serverPort, transfer.ID)
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Post(uploadURL, writer.FormDataContentType(), body)
+		if err != nil {
+			log.Printf("Error uploading file to receiver: %v", err)
+			http.Error(w, "Failed to upload to receiver", http.StatusInternalServerError)
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			transfer.Status = "completed"
+			broadcastMessage("transfer_completed", transfer)
+			log.Printf("File successfully sent to receiver for transfer %s", transferID)
+		}
+
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 	defer file.Close()
 
+	// Save received file
 	tempDir := filepath.Join(os.TempDir(), "file-share")
 	os.MkdirAll(tempDir, 0o755)
-	tempPath := filepath.Join(tempDir, transferID+"_"+handler.Filename)
+	tempPath := filepath.Join(tempDir, transferID+"_"+header.Filename)
 
 	out, err := os.Create(tempPath)
 	if err != nil {
@@ -524,60 +586,11 @@ func receiveFileUpload(w http.ResponseWriter, r *http.Request) {
 
 	io.Copy(out, file)
 
-	transfer.Status = "accepted" // or maybe "ready"
-	broadcastMessage("transfer_accepted", transfer)
+	transfer.Status = "completed"
+	broadcastMessage("transfer_completed", transfer)
 
-	json.NewEncoder(w).Encode(map[string]string{"status": "received"})
-}
-
-func acceptTransfer(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	transferID := vars["transferId"]
-
-	transfer, exists := transfers[transferID]
-	if !exists {
-		http.Error(w, "Transfer not found", http.StatusNotFound)
-		return
-	}
-	log.Printf("AcceptTransfer: Transfer found - ID: %s, Status: %s", transferID, transfer.Status)
-	transfer.Status = "accepted"
-
-	log.Printf("AcceptTransfer: Updated status to 'accepted' for ID: %s", transferID)
-
-	go func() {
-		filePath := filepath.Join(os.TempDir(), "file-share", transfer.ID+"_"+transfer.Filename)
-		file, err := os.Open(filePath)
-		if err != nil {
-			log.Println("Error opening file to send:", err)
-			return
-		}
-		defer file.Close()
-
-		body := &bytes.Buffer{}
-		writer := multipart.NewWriter(body)
-		part, err := writer.CreateFormFile("file", transfer.Filename)
-		if err != nil {
-			log.Println("Error creating form file:", err)
-			return
-		}
-		io.Copy(part, file)
-		writer.Close()
-
-		uploadURL := fmt.Sprintf("http://%s:%s/api/upload/%s", transfer.To, serverPort, transfer.ID)
-		resp, err := http.Post(uploadURL, writer.FormDataContentType(), body)
-		if err != nil {
-			log.Println("Error uploading file to receiver:", err)
-			return
-		}
-		defer resp.Body.Close()
-		log.Println("Uploaded file to", transfer.To)
-	}()
-	broadcastMessage("transfer_accepted", transfer)
-
-	log.Printf("AcceptTransfer: Broadcasted transfer_accepted for ID: %s", transferID)
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(transfer)
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "uploaded"})
 }
 
 func rejectTransfer(w http.ResponseWriter, r *http.Request) {
@@ -602,80 +615,37 @@ func rejectTransfer(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(transfer)
 }
 
-// Receiver handler
-func receiveIncomingFile(w http.ResponseWriter, r *http.Request) {
-	transferID := r.FormValue("transferId")
-	log.Printf("ReceiveIncomingFile: Received file for transfer %s", transferID)
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		http.Error(w, "Failed to read file", http.StatusBadRequest)
-		return
-	}
-	defer file.Close()
-
-	tempDir := filepath.Join(os.TempDir(), "file-share")
-	log.Printf("ReceiveIncomingFile: Saving file to %s", tempDir)
-
-	os.MkdirAll(tempDir, 0o755)
-	tempPath := filepath.Join(tempDir, transferID+"_"+header.Filename)
-
-	out, err := os.Create(tempPath)
-	if err != nil {
-		http.Error(w, "Failed to save file", http.StatusInternalServerError)
-		return
-	}
-	defer out.Close()
-
-	io.Copy(out, file)
-
-	log.Printf("ReceiveIncomingFile: File saved successfully")
-
-	// Update transfer status to "completed"
-	if transfer, exists := transfers[transferID]; exists {
-		transfer.Status = "completed"
-		broadcastMessage("transfer_completed", transfer)
-	}
-
-	w.WriteHeader(http.StatusOK)
-}
-
-func uploadFile(w http.ResponseWriter, r *http.Request) {
+func downloadFile(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	transferID := vars["transferId"]
 
-	_, exists := transfers[transferID]
+	transfer, exists := transfers[transferID]
 	if !exists {
 		http.Error(w, "Transfer not found", http.StatusNotFound)
 		return
 	}
 
-	err := r.ParseMultipartForm(32 << 20)
-	if err != nil {
-		http.Error(w, "Failed to parse form", http.StatusBadRequest)
+	if transfer.Status != "completed" {
+		http.Error(w, "Transfer not completed", http.StatusBadRequest)
 		return
 	}
 
-	file, header, err := r.FormFile("file")
+	tempDir := filepath.Join(os.TempDir(), "file-share")
+	tempPath := filepath.Join(tempDir, transferID+"_"+transfer.Filename)
+
+	file, err := os.Open(tempPath)
 	if err != nil {
-		http.Error(w, "Failed to read file", http.StatusBadRequest)
+		http.Error(w, "File not found", http.StatusNotFound)
 		return
 	}
 	defer file.Close()
 
-	tempDir := filepath.Join(os.TempDir(), "file-share")
-	os.MkdirAll(tempDir, 0o755)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", transfer.Filename))
+	w.Header().Set("Content-Type", "application/octet-stream")
 
-	filePath := filepath.Join(tempDir, transferID+"_"+header.Filename)
-	out, err := os.Create(filePath)
-	if err != nil {
-		http.Error(w, "Failed to create file", http.StatusInternalServerError)
-		return
-	}
-	defer out.Close()
+	io.Copy(w, file)
 
-	io.Copy(out, file)
-
-	// Confirm save
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"status": "uploaded"})
+	// Clean up after download
+	os.Remove(tempPath)
+	log.Printf("File downloaded and cleaned up for transfer %s", transferID)
 }
