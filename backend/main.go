@@ -114,7 +114,7 @@ func main() {
 
 	fmt.Printf("Server starting on port %s\n", serverPort)
 	fmt.Printf("Device name: %s\n", deviceName)
-	log.Fatal(http.ListenAndServe(":"+serverPort, handler))
+	log.Fatal(http.ListenAndServe("0.0.0.0:"+serverPort, handler))
 }
 
 func (h *Hub) run() {
@@ -180,14 +180,18 @@ func broadcastMessage(msgType string, data interface{}) {
 }
 
 func getLocalIP() string {
-	conn, err := net.Dial("udp", "8.8.8.8:80")
+	addrs, err := net.InterfaceAddrs()
 	if err != nil {
 		return "127.0.0.1"
 	}
-	defer conn.Close()
-
-	localAddr := conn.LocalAddr().(*net.UDPAddr)
-	return localAddr.IP.String()
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ipnet.IP.To4() != nil {
+				return ipnet.IP.String()
+			}
+		}
+	}
+	return "127.0.0.1"
 }
 
 func startDiscoveryBroadcast() {
@@ -390,7 +394,7 @@ func notifyTransfer(w http.ResponseWriter, r *http.Request) {
 }
 
 func notifyPeerOfTransfer(targetIP string, transfer *FileTransfer) {
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second}
 
 	jsonData, _ := json.Marshal(transfer)
 	resp, err := client.Post(
@@ -428,17 +432,17 @@ func acceptTransfer(w http.ResponseWriter, r *http.Request) {
 }
 
 func notifySenderOfAcceptance(senderIP, transferID string) {
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Post(
-		fmt.Sprintf("http://%s:%s/api/accept-remote/%s", senderIP, serverPort, transferID),
-		"application/json",
-		nil,
-	)
+	url := fmt.Sprintf("http://%s:%s/api/accept-remote/%s", senderIP, serverPort, transferID)
+	log.Printf("Attempting to notify sender at: %s", url) // Add this line
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Post(url, "application/json", nil)
 	if err != nil {
-		log.Printf("Error notifying sender: %v", err)
+		log.Printf("Error notifying sender %s: %v", senderIP, err)
 		return
 	}
 	defer resp.Body.Close()
+	log.Printf("Notification to sender successful") // Add success log
 }
 
 func requestFileFromSender(transfer *FileTransfer) {

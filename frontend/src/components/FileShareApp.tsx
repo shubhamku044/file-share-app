@@ -182,7 +182,7 @@ const FileShareApp: React.FC = () => {
 
   const handleDownloadFile = (transfer) => {
     console.log('Transfer', transfer);
-    window.open(`http://${transfer.fromIP}:8080/api/download/${transfer.id}`, '_blank');
+    window.open(`/api/download/${transfer.id}`, '_blank');
   };
 
   const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
