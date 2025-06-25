@@ -35,6 +35,7 @@ type FileTransfer struct {
 	From     string `json:"from"`
 	To       string `json:"to"`
 	Status   string `json:"status"` // pending, accepted, rejected, completed
+	FromIP   string `json:"fromIP"`
 }
 
 type Hub struct {
@@ -93,6 +94,7 @@ func main() {
 	r.HandleFunc("/api/send", sendFile).Methods("POST")
 	r.HandleFunc("/api/download/{transferId}", downloadFile).Methods("GET")
 	r.HandleFunc("/api/accept/{transferId}", acceptTransfer).Methods("POST")
+	r.HandleFunc("/api/accept-remote/{transferId}", acceptRemoteTransfer).Methods("POST")
 	r.HandleFunc("/api/reject/{transferId}", rejectTransfer).Methods("POST")
 	r.HandleFunc("/api/notify-transfer", notifyTransfer).Methods("POST")
 	r.HandleFunc("/api/device-name", getDeviceName).Methods("GET")
@@ -347,6 +349,7 @@ func sendFile(w http.ResponseWriter, r *http.Request) {
 		From:     deviceName,
 		To:       targetIP,
 		Status:   "pending",
+		FromIP:   getLocalIP(),
 	}
 
 	transfers[transferID] = transfer
@@ -412,17 +415,30 @@ func acceptTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("AcceptTransfer: Transfer found - ID: %s, Status: %s", transferID, transfer.Status)
 	transfer.Status = "accepted"
-
-	// Notify sender to upload the file
-	go requestFileFromSender(transfer)
-
 	broadcastMessage("transfer_accepted", transfer)
-	log.Printf("AcceptTransfer: Broadcasted transfer_accepted for ID: %s", transferID)
+
+	// Notify sender to start file transfer
+	if transfer.FromIP != "" {
+		go notifySenderOfAcceptance(transfer.FromIP, transfer.ID)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(transfer)
+}
+
+func notifySenderOfAcceptance(senderIP, transferID string) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post(
+		fmt.Sprintf("http://%s:%s/api/accept-remote/%s", senderIP, serverPort, transferID),
+		"application/json",
+		nil,
+	)
+	if err != nil {
+		log.Printf("Error notifying sender: %v", err)
+		return
+	}
+	defer resp.Body.Close()
 }
 
 func requestFileFromSender(transfer *FileTransfer) {
@@ -648,4 +664,61 @@ func downloadFile(w http.ResponseWriter, r *http.Request) {
 	// Clean up after download
 	os.Remove(tempPath)
 	log.Printf("File downloaded and cleaned up for transfer %s", transferID)
+}
+
+func pushFileToReceiver(transfer *FileTransfer) {
+	tempDir := filepath.Join(os.TempDir(), "file-share")
+	tempPath := filepath.Join(tempDir, transfer.ID+"_"+transfer.Filename)
+
+	fileData, err := os.Open(tempPath)
+	if err != nil {
+		log.Printf("Error opening file: %v", err)
+		return
+	}
+	defer fileData.Close()
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, err := writer.CreateFormFile("file", transfer.Filename)
+	if err != nil {
+		log.Println("Error creating form file:", err)
+		return
+	}
+	io.Copy(part, fileData)
+	writer.Close()
+
+	// Send to receiver
+	uploadURL := fmt.Sprintf("http://%s:%s/api/upload/%s", transfer.To, serverPort, transfer.ID)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Post(uploadURL, writer.FormDataContentType(), body)
+	if err != nil {
+		log.Printf("Error uploading file to receiver: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		transfer.Status = "completed"
+		broadcastMessage("transfer_completed", transfer)
+	}
+}
+
+func acceptRemoteTransfer(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	transferID := vars["transferId"]
+
+	transfer, exists := transfers[transferID]
+	if !exists {
+		http.Error(w, "Transfer not found", http.StatusNotFound)
+		return
+	}
+
+	transfer.Status = "accepted"
+	broadcastMessage("transfer_accepted", transfer)
+
+	// Start pushing file to receiver
+	go pushFileToReceiver(transfer)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(transfer)
 }

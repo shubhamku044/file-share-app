@@ -180,8 +180,8 @@ const FileShareApp: React.FC = () => {
     }
   };
 
-  const handleDownloadFile = (transferId) => {
-    window.open(`http://localhost:8080/api/receive/${transferId}`, '_blank');
+  const handleDownloadFile = (transfer) => {
+    window.open(`http://${transfer.fromIP}:8080/api/download/${transfer.id}`, '_blank');
   };
 
   const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
