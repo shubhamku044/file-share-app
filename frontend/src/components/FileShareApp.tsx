@@ -181,6 +181,7 @@ const FileShareApp: React.FC = () => {
   };
 
   const handleDownloadFile = (transfer) => {
+    console.log('Transfer', transfer);
     window.open(`http://${transfer.fromIP}:8080/api/download/${transfer.id}`, '_blank');
   };
 
@@ -370,7 +371,7 @@ const FileShareApp: React.FC = () => {
                       </div>
                     </div>
                     <button
-                      onClick={() => handleDownloadFile(transfer.id)}
+                      onClick={() => handleDownloadFile(transfer)}
                       className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors flex items-center space-x-1"
                     >
                       <Download className="w-4 h-4" />
@@ -420,7 +421,7 @@ const FileShareApp: React.FC = () => {
                 </div>
               </div>
               <button
-                onClick={() => handleDownloadFile(transfer.id)}
+                onClick={() => handleDownloadFile(transfer)}
                 className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors flex items-center space-x-1"
               >
                 <Download className="w-4 h-4" />
@@ -445,7 +446,7 @@ const FileShareApp: React.FC = () => {
                       </div>
                     </div>
                     <button
-                      onClick={() => handleDownloadFile(transfer.id)}
+                      onClick={() => handleDownloadFile(transfer)}
                       className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors flex items-center space-x-1"
                     >
                       <Download className="w-4 h-4" />
